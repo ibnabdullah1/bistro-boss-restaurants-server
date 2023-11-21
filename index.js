@@ -203,7 +203,6 @@ async function run() {
     app.post("/create-payment-intent", async (req, res) => {
       const { price } = req.body;
       const amount = parseInt(price * 100);
-      console.log("Amount in the intent: ", amount);
       const paymentIntent = await stripe.paymentIntents.create({
         amount: amount,
         currency: "usd",
@@ -228,7 +227,6 @@ async function run() {
       const paymentResult = await paymentCollection.insertOne(payment);
 
       //  carefully delete each item from the cart
-      console.log("payment info", payment);
       const query = {
         _id: {
           $in: payment.cartIds.map((id) => new ObjectId(id)),
@@ -238,6 +236,79 @@ async function run() {
       const deleteResult = await cartCollection.deleteMany(query);
 
       res.send({ paymentResult, deleteResult });
+    });
+
+    // stats or analytics
+    app.get("/admin_stats", async (req, res) => {
+      const users = await usersCollection.estimatedDocumentCount();
+      const menuItems = await menuCollection.estimatedDocumentCount();
+      const orders = await paymentCollection.estimatedDocumentCount();
+
+      //this is not the best way.
+      // const payments = await paymentCollection.find().toArray();
+      // const revenue = payments.reduce((total, item) => total + item.price, 0);
+
+      const result = await paymentCollection
+        .aggregate([
+          {
+            $group: {
+              _id: null,
+              totalRevenue: {
+                $sum: "$price",
+              },
+            },
+          },
+        ])
+        .toArray();
+      const totalRevenue = result.length > 0 ? result[0].totalRevenue : 0;
+
+      res.send({ users, menuItems, orders, totalRevenue });
+    });
+
+    /**
+     * Order status
+     * ------------------------------
+     * Non-Efficient way
+     * ------------------------------
+     * 1. Load all the payments
+     * 2. For every manyItemsId (which is an array ) , go find the item form menuCollection
+     * 3. For every item in the menuCollection the you found from the payment entry (document)
+     */
+
+    // Using  aggregate pipeline
+    app.get("/order_stats", verifyToken, verifyAdmin, async (req, res) => {
+      const result = await paymentCollection
+        .aggregate([
+          { $unwind: "$menuItemIds" },
+          {
+            $lookup: {
+              from: "menu",
+              localField: "menuItemIds",
+              foreignField: "_id",
+              as: "menuItems",
+            },
+          },
+          { $unwind: "$menuItems" },
+          {
+            $group: {
+              _id: "$menuItems.category",
+              quantity: {
+                $sum: 1,
+              },
+              totalRevenue: { $sum: "$menuItems.price" },
+            },
+          },
+          {
+            $project: {
+              _id: 0,
+              category: "$_id",
+              quantity: "$quantity",
+              totalRevenue: "$totalRevenue",
+            },
+          },
+        ])
+        .toArray();
+      res.send(result);
     });
 
     // Send a ping to confirm a successful connection
